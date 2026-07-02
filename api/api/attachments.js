@@ -1,8 +1,8 @@
 import { db, checkAppPassword, readJson } from "./_lib.js";
 
-// Uploads one invoice file to Supabase Storage (bucket "invoices") and records
-// its path on the matching invoice row. The frontend matches filename -> invoice
-// and posts one file at a time so each request stays small.
+// Two small actions. "sign" hands the browser a short-lived URL to upload the
+// file straight to Supabase Storage (so file bytes never pass through this
+// function, avoiding the request size limit). "confirm" records the link.
 export default async function handler(req, res) {
   if (!checkAppPassword(req)) {
     res.status(401).json({ error: "Unauthorized" });
@@ -14,31 +14,41 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { invoice_id, filename, content_base64, content_type } = await readJson(req);
-    if (!invoice_id || !filename || !content_base64) {
-      res.status(400).json({ error: "invoice_id, filename and content_base64 are required" });
+    const body = await readJson(req);
+    const supabase = db();
+
+    if (body.action === "sign") {
+      const { invoice_id, filename } = body;
+      if (!invoice_id || !filename) {
+        res.status(400).json({ error: "invoice_id and filename required" });
+        return;
+      }
+      const safe = String(filename).replace(/[^\w.\- ]/g, "_");
+      const path = `${invoice_id}/${safe}`;
+      const { data, error } = await supabase.storage
+        .from("invoices")
+        .createSignedUploadUrl(path, { upsert: true });
+      if (error) throw error;
+      res.status(200).json({ signedUrl: data.signedUrl, path });
       return;
     }
-    const supabase = db();
-    const safe = String(filename).replace(/[^\w.\- ]/g, "_");
-    const path = `${invoice_id}/${safe}`;
-    const buffer = Buffer.from(content_base64, "base64");
 
-    const { error: upErr } = await supabase.storage
-      .from("invoices")
-      .upload(path, buffer, {
-        contentType: content_type || "application/octet-stream",
-        upsert: true,
-      });
-    if (upErr) throw upErr;
+    if (body.action === "confirm") {
+      const { invoice_id, path, filename } = body;
+      if (!invoice_id || !path) {
+        res.status(400).json({ error: "invoice_id and path required" });
+        return;
+      }
+      const { error } = await supabase
+        .from("invoices")
+        .update({ attachment_path: path, attachment_name: filename, updated_at: new Date().toISOString() })
+        .eq("id", invoice_id);
+      if (error) throw error;
+      res.status(200).json({ ok: true });
+      return;
+    }
 
-    const { error } = await supabase
-      .from("invoices")
-      .update({ attachment_path: path, attachment_name: filename, updated_at: new Date().toISOString() })
-      .eq("id", invoice_id);
-    if (error) throw error;
-
-    res.status(200).json({ ok: true, path });
+    res.status(400).json({ error: "unknown action" });
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) });
   }
