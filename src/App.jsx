@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import { api, setPassword } from "./api.js";
 import {
   usd, fmtDate, parseAmount, parseDate, daysOverdue, bucketOf, tierFor,
-  BUCKETS, TIER_TAG, buildTemplate, buildReminders,
+  BUCKETS, TIER_TAG, buildTemplate, buildReminders, pickInvoiceForFilename,
 } from "../lib/receivables.js";
 
 const FIELDS = [
@@ -94,12 +94,15 @@ function Main() {
         <div className="tabs">
           <button className={view === "receivables" ? "tab on" : "tab"} onClick={() => setView("receivables")}>Receivables</button>
           <button className={view === "import" ? "tab on" : "tab"} onClick={() => setView("import")}>Import</button>
+          <button className={view === "attach" ? "tab on" : "tab"} onClick={() => setView("attach")}>Attachments</button>
         </div>
       </div>
       <div className="pad">
         {flash && <div className="ok">{flash}</div>}
         {view === "import"
           ? <Import onDone={(n) => { setFlash(`Imported ${n} invoices.`); reload(); setView("receivables"); }} />
+          : view === "attach"
+          ? <Attachments invoices={invoices} reload={reload} />
           : <Receivables invoices={invoices} loading={loading} reload={reload} />}
       </div>
     </div>
@@ -348,7 +351,7 @@ function Receivables({ invoices, loading, reload }) {
               return (
                 <tr key={r.id}>
                   <td>{r.client}{r.paused && <span className="pill" style={{ marginLeft: 6 }}>paused</span>}</td>
-                  <td>{r.invoice_no || "—"}</td>
+                  <td>{r.invoice_no || "—"}{r.attachment_name && <span className="pill" style={{ marginLeft: 6 }} title={r.attachment_name}>file</span>}</td>
                   <td className="num">{usd(parseAmount(r.amount))}</td>
                   <td className="num" style={{ color: bc.color }}>{fmtDate(parseDate(r.due_date))}{over > 0 ? ` (${over}d)` : ""}</td>
                   <td>{r.status}</td>
@@ -363,6 +366,108 @@ function Receivables({ invoices, loading, reload }) {
         </table></div>
       </div>
     </div>
+  );
+}
+
+/* ----------------------------- attachments ----------------------------- */
+function Attachments({ invoices, reload }) {
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(0);
+  const [errs, setErrs] = useState([]);
+  const inputRef = useRef(null);
+
+  const invoiceNos = invoices.map((i) => i.invoice_no).filter(Boolean);
+  const byNo = useMemo(() => {
+    const m = {}; invoices.forEach((i) => { if (i.invoice_no) m[i.invoice_no] = i; }); return m;
+  }, [invoices]);
+  const attachedCount = invoices.filter((i) => i.attachment_name).length;
+
+  function onFiles(fileList) {
+    const mapped = Array.from(fileList || []).map((file) => {
+      const matchNo = pickInvoiceForFilename(file.name, invoiceNos);
+      return { file, matchNo, invoice: matchNo ? byNo[matchNo] : null };
+    });
+    setRows(mapped); setDone(0); setErrs([]);
+  }
+
+  const matched = rows.filter((r) => r.invoice);
+  const unmatched = rows.filter((r) => !r.invoice);
+
+  const toB64 = (file) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(",")[1]);
+    r.onerror = rej; r.readAsDataURL(file);
+  });
+
+  async function upload() {
+    setBusy(true); setDone(0); const e = [];
+    for (const m of matched) {
+      try {
+        const b64 = await toB64(m.file);
+        await api.attach({ invoice_id: m.invoice.id, filename: m.file.name, content_base64: b64, content_type: m.file.type || "application/pdf" });
+        setDone((d) => d + 1);
+      } catch (err) { e.push(`${m.file.name}: ${err.message}`); }
+    }
+    setErrs(e); setBusy(false); reload();
+  }
+
+  if (invoices.length === 0) return (
+    <>
+      <p className="eyebrow">Attachments</p>
+      <h2 className="h">Import your invoices first</h2>
+      <p className="sub">Files are matched to invoices by number, so there's nothing to match against until you've imported the tracker.</p>
+    </>
+  );
+
+  return (
+    <>
+      <p className="eyebrow">Attachments</p>
+      <h2 className="h">Link invoice files</h2>
+      <p className="sub">Select all the invoice files (PDFs or images). Each is matched to an invoice by the number at the start of its filename, then attached to that client's reminder. Attachments ride on the automated send, so the "Open in mail" preview won't include them.</p>
+
+      {attachedCount > 0 && <div className="ok">{attachedCount} invoice{attachedCount === 1 ? "" : "s"} already {attachedCount === 1 ? "has" : "have"} a linked file.</div>}
+
+      <div className="drop" onClick={() => inputRef.current.click()}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => { e.preventDefault(); onFiles(e.dataTransfer.files); }}>
+        <div className="big">Click to choose files, or drag them here</div>
+        <div className="sm">.pdf · .png · .jpg — select the whole folder's worth at once</div>
+        <input ref={inputRef} type="file" accept=".pdf,.png,.jpg,.jpeg" multiple style={{ display: "none" }}
+          onChange={(e) => onFiles(e.target.files)} />
+      </div>
+
+      {rows.length > 0 && (
+        <>
+          <div style={{ height: 16 }} />
+          <div className="row" style={{ marginBottom: 10 }}>
+            <span className="pill green">{matched.length} matched</span>
+            {unmatched.length > 0 && <span className="pill" style={{ color: "var(--oxblood)", borderColor: "var(--oxblood)" }}>{unmatched.length} no match</span>}
+          </div>
+          <div className="prev"><table>
+            <thead><tr><th>File</th><th>Matched to</th></tr></thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i}>
+                  <td>{r.file.name}</td>
+                  <td style={{ color: r.invoice ? "var(--ink)" : "var(--oxblood)" }}>
+                    {r.invoice ? `${r.invoice.client} — ${r.matchNo}` : "no matching invoice"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+
+          {errs.length > 0 && <div className="warn" style={{ marginTop: 12 }}>{errs.length} file(s) failed: {errs[0]}</div>}
+
+          <div style={{ height: 14 }} />
+          <button className="btn" disabled={busy || matched.length === 0} onClick={upload}>
+            {busy ? `Uploading ${done}/${matched.length}…` : `Upload ${matched.length} matched file${matched.length === 1 ? "" : "s"}`}
+          </button>
+          {unmatched.length > 0 && <p className="miss" style={{ marginTop: 10 }}>Unmatched files usually mean the invoice number in the filename doesn't match any imported invoice, or that invoice wasn't imported.</p>}
+        </>
+      )}
+    </>
   );
 }
 
