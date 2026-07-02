@@ -21,5 +21,15 @@ export const api = {
   import: (rows) => call("POST", "/api/invoices", { rows }),
   update: (id, action) => call("PATCH", "/api/invoices", { id, action }),
   draft: (group) => call("POST", "/api/draft", group),
-  attach: (payload) => call("POST", "/api/attachments", payload),
+  attach: async ({ invoice_id, file, filename }) => {
+    const { signedUrl, path } = await call("POST", "/api/attachments", { action: "sign", invoice_id, filename });
+    const put = await fetch(signedUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "content-type": file.type || "application/octet-stream", "x-upsert": "true" },
+    });
+    if (!put.ok) throw new Error(`storage upload ${put.status}`);
+    await call("POST", "/api/attachments", { action: "confirm", invoice_id, path, filename });
+    return { ok: true };
+  },
 };
