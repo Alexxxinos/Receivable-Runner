@@ -446,8 +446,7 @@ function Attachments({ invoices, reload }) {
     setBusy(true); setDone(0); const e = [];
     for (const m of matched) {
       try {
-        const b64 = await toB64(m.file);
-        await api.attach({ invoice_id: m.invoice.id, filename: m.file.name, content_base64: b64, content_type: m.file.type || "application/pdf" });
+        await api.attach({ invoice_id: m.invoice.id, file: m.file, filename: m.file.name });
         setDone((d) => d + 1);
       } catch (err) { e.push(`${m.file.name}: ${err.message}`); }
     }
