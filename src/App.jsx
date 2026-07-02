@@ -375,6 +375,7 @@ function Attachments({ invoices, reload }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(0);
   const [errs, setErrs] = useState([]);
+  const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef(null);
 
   const invoiceNos = invoices.map((i) => i.invoice_no).filter(Boolean);
@@ -383,22 +384,63 @@ function Attachments({ invoices, reload }) {
   }, [invoices]);
   const attachedCount = invoices.filter((i) => i.attachment_name).length;
 
+  // make the file picker read whole folders, including nested subfolders
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.setAttribute("webkitdirectory", "");
+      inputRef.current.setAttribute("directory", "");
+    }
+  }, []);
+
+  const isInvoiceFile = (name) => /\.(pdf|png|jpe?g)$/i.test(name);
+
   function onFiles(fileList) {
-    const mapped = Array.from(fileList || []).map((file) => {
-      const matchNo = pickInvoiceForFilename(file.name, invoiceNos);
-      return { file, matchNo, invoice: matchNo ? byNo[matchNo] : null };
-    });
+    const mapped = Array.from(fileList || [])
+      .filter((file) => isInvoiceFile(file.name))
+      .map((file) => {
+        const matchNo = pickInvoiceForFilename(file.name, invoiceNos);
+        return { file, matchNo, invoice: matchNo ? byNo[matchNo] : null };
+      });
     setRows(mapped); setDone(0); setErrs([]);
   }
 
-  const matched = rows.filter((r) => r.invoice);
-  const unmatched = rows.filter((r) => !r.invoice);
+  // walk a dropped folder tree (all levels) and collect every file
+  async function walkEntries(entries) {
+    const out = [];
+    async function walk(entry) {
+      if (!entry) return;
+      if (entry.isFile) {
+        await new Promise((res) => entry.file((f) => { out.push(f); res(); }, () => res()));
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const readBatch = () => new Promise((res) => reader.readEntries((e) => res(e), () => res([])));
+        let batch;
+        do { batch = await readBatch(); for (const e of batch) await walk(e); } while (batch.length);
+      }
+    }
+    for (const e of entries) await walk(e);
+    return out;
+  }
+
+  function onDrop(e) {
+    e.preventDefault(); setDragOver(false);
+    const dt = e.dataTransfer;
+    const entries = [];
+    if (dt.items && dt.items.length && dt.items[0].webkitGetAsEntry) {
+      for (const it of dt.items) { const en = it.webkitGetAsEntry && it.webkitGetAsEntry(); if (en) entries.push(en); }
+    }
+    if (entries.length) walkEntries(entries).then(onFiles);
+    else onFiles(dt.files);
+  }
 
   const toB64 = (file) => new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(String(r.result).split(",")[1]);
     r.onerror = rej; r.readAsDataURL(file);
   });
+
+  const matched = rows.filter((r) => r.invoice);
+  const unmatched = rows.filter((r) => !r.invoice);
 
   async function upload() {
     setBusy(true); setDone(0); const e = [];
@@ -428,11 +470,12 @@ function Attachments({ invoices, reload }) {
 
       {attachedCount > 0 && <div className="ok">{attachedCount} invoice{attachedCount === 1 ? "" : "s"} already {attachedCount === 1 ? "has" : "have"} a linked file.</div>}
 
-      <div className="drop" onClick={() => inputRef.current.click()}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => { e.preventDefault(); onFiles(e.dataTransfer.files); }}>
-        <div className="big">Click to choose files, or drag them here</div>
-        <div className="sm">.pdf · .png · .jpg — select the whole folder's worth at once</div>
+      <div className={"drop" + (dragOver ? " over" : "")} onClick={() => inputRef.current.click()}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}>
+        <div className="big">Click to choose your invoice folder, or drag the folder here</div>
+        <div className="sm">Reads every PDF or image inside, including all subfolders</div>
         <input ref={inputRef} type="file" accept=".pdf,.png,.jpg,.jpeg" multiple style={{ display: "none" }}
           onChange={(e) => onFiles(e.target.files)} />
       </div>
@@ -494,6 +537,7 @@ function Style() {
     .sm2{color:var(--ink2);font-size:12px}
     .drop{border:2px dashed var(--rule);background:var(--paper2);padding:46px 24px;text-align:center;border-radius:3px;cursor:pointer}
     .drop:hover{border-color:var(--oxblood);background:#fff}
+    .drop.over{border-color:var(--oxblood);background:#fff}
     .drop .big{font-weight:800;font-size:17px}.drop .sm{color:var(--ink2);font-size:12px;margin-top:6px}
     .btn{font-weight:700;font-size:13px;border:1.5px solid var(--ink);background:var(--ink);color:var(--paper2);padding:10px 16px;border-radius:2px;cursor:pointer}
     .btn:hover{background:#000}.btn:disabled{opacity:.45;cursor:not-allowed}
