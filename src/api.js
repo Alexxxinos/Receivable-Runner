@@ -21,4 +21,5 @@ export const api = {
   import: (rows) => call("POST", "/api/invoices", { rows }),
   update: (id, action) => call("PATCH", "/api/invoices", { id, action }),
   draft: (group) => call("POST", "/api/draft", group),
+  attach: (payload) => call("POST", "/api/attachments", payload),
 };
